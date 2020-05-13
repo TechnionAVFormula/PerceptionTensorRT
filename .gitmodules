@@ -1,0 +1,6 @@
+[submodule "tensorRTWrapper"]
+	path = tensorRTWrapper
+	url = git@github.com:TechnionAVFormula/tensorRTWrapper.git
+[submodule "caffe-yolov3"]
+	path = caffe-yolov3
+	url = https://github.com/TechnionAVFormula/caffe-yolov3
