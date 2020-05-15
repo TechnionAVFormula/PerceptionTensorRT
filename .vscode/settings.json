@@ -1,3 +1,7 @@
 {
-    "python.pythonPath": "/home/daan/.virtualenvs/systemrunner/bin/python"
+    "python.pythonPath": "/home/daan/.virtualenvs/systemrunner/bin/python",
+    "files.associations": {
+        "bitset": "cpp",
+        "memory": "cpp"
+    }
 }
