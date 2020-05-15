@@ -59,6 +59,10 @@ from pyFormulaClientNoNvidia import messages
 import argparse
 from timeit import default_timer as timer
 import csv
+import torch
+import torchvision
+from utils.nms import nms
+from utils.utils import calculate_padding
 
 import wget
 from data_processing import PreprocessYOLO, PostprocessYOLO, ALL_CATEGORIES
@@ -72,7 +76,14 @@ class TestRunner:
         self.raw_image = Image.frombytes("RGB", (camera_data.width, camera_data.height), camera_data.pixels, 'raw', 'RGBX', 0,-1)
         self.input_resolution = input_resolution
         self.out_image = out_image
+        self.image_height = self.input_resolution[0]
+        self.image_width = self.input_resolution[1]
+        self.num_classes = 80 # Should read from file
+        self.bbox_attrs = self.num_classes + 5
+        self.conf_thres = 0.5
+        self.nms_thres = 0.25
 
+        self.yolo_masks = [(6, 7, 8), (3, 4, 5), (0, 1, 2)]
         self.output_shapes = [(1, 255, 25, 25), (1, 255, 50, 50), (1, 255, 100, 100)]
         vanilla_anchors = [(10, 13), (16, 30), (33, 23), (30, 61), (62, 45), 
                             (59, 119), (116, 90), (156, 198), (373, 326)]
@@ -92,24 +103,124 @@ class TestRunner:
         # Load an image from the specified input path, and return it together with  a pre-processed version
         return preprocessor.process(self.raw_image)
 
+    def _forward_yolo_output(self, sample, anchors):
+        nA = len(anchors)
+        nB = sample.size(0)
+        nGh = sample.size(2)
+        nGw = sample.size(3)
+        stride = self.image_height / nGh
+        print(sample.size(), self.bbox_attrs, nB, nA, nGh, nGw)
+        prediction = sample.view(nB, nA, self.bbox_attrs, nGh, nGw).permute(0, 1, 3, 4, 2).contiguous()
+
+        x = torch.sigmoid(prediction[..., 0])  # Center x
+        y = torch.sigmoid(prediction[..., 1])  # Center y
+        w = prediction[..., 2]  # Width
+        h = prediction[..., 3]  # Height
+        pred_conf = torch.sigmoid(prediction[..., 4])  # Conf
+        pred_cls = torch.sigmoid(prediction[..., 5:])  # Cls pred.
+
+        # Calculate offsets for each grid
+        grid_x = torch.arange(nGw, dtype=torch.float, device=x.device).repeat(nGh, 1).view([1, 1, nGh, nGw])
+        grid_y = torch.arange(nGh, dtype=torch.float, device=x.device).repeat(nGw, 1).t().view([1, 1, nGh, nGw]).contiguous()
+        scaled_anchors = torch.tensor([(a_w / stride, a_h / stride) for a_w, a_h in anchors], dtype=torch.float, device=x.device)
+        anchor_w = scaled_anchors[:, 0:1].view((1, nA, 1, 1))
+        anchor_h = scaled_anchors[:, 1:2].view((1, nA, 1, 1))
+
+        # Add offset and scale with anchors
+        pred_boxes = torch.zeros(prediction[..., :4].shape, dtype=torch.float, device=x.device)
+        pred_boxes[..., 0] = x.data + grid_x
+        pred_boxes[..., 1] = y.data + grid_y
+        pred_boxes[..., 2] = torch.exp(w.data) * anchor_w
+        pred_boxes[..., 3] = torch.exp(h.data) * anchor_h
+
+        print(pred_boxes.size(), pred_conf.size(), pred_cls.size())
+        # If not in training phase return predictions
+        output = torch.cat((
+                pred_boxes.view(nB, -1, 4) * stride,
+                pred_conf.view(nB, -1, 1),
+                pred_cls.view(nB, -1, self.num_classes)),
+                -1)
+        return output
+
+    @staticmethod
+    def mem_to_tensor(alloc, shape):
+        '''Convert a :class:`pycuda.gpuarray.GPUArray` to a :class:`torch.Tensor`. The underlying
+        storage will NOT be shared, since a new copy must be allocated.
+        Parameters
+        ----------
+        gpuarray  :   pycuda.gpuarray.GPUArray
+        Returns
+        -------
+        torch.Tensor
+        '''
+        out = torch.zeros(shape, dtype=torch.float32).cuda()
+        pycuda.driver.memcpy_dtod(out.data_ptr(), alloc.device, alloc.host.nbytes)
+        return out
+
     def _post_process(self, output):
-        # Before doing post-processing, we need to reshape the outputs as the common.do_inference will give us flat arrays.
-        output = [output.reshape(shape) for output, shape in zip(output, self.output_shapes)]
+        start = timer()
+        A = TestRunner.mem_to_tensor(output[0], self.output_shapes[0])
+        B = TestRunner.mem_to_tensor(output[1], self.output_shapes[1])
+        C = TestRunner.mem_to_tensor(output[2], self.output_shapes[2])
+        tensor_creation_time = timer() - start
+        print(f"Creating tensor {round((tensor_creation_time)*1000)} [ms] ")
+        print(A.size(), B.size(), C.size())
+        anchors_A = ([self.anchors[i] for i in self.yolo_masks[0]])
+        anchors_B = ([self.anchors[i] for i in self.yolo_masks[1]])
+        anchors_C = ([self.anchors[i] for i in self.yolo_masks[2]])
+        print(anchors_A, anchors_B, anchors_C)
+        output_A = self._forward_yolo_output(A, anchors_A)
+        output_B = self._forward_yolo_output(B, anchors_B)
+        output_C = self._forward_yolo_output(C, anchors_C)
+        print(output_A.size(), output_B.size(), output_C.size())
+        full_output = torch.cat((output_A, output_B, output_C), 1)
+        print(full_output.size())
+        w, h = self.raw_image.size
+        pad_h, pad_w, ratio = calculate_padding(h, w, self.image_height, self.image_width)
+        for detections in full_output:
+            detections = detections[detections[:, 4] > self.conf_thres]
+            box_corner = torch.zeros((detections.shape[0], 4), device=detections.device)
+            xy = detections[:, 0:2]
+            wh = detections[:, 2:4] / 2
+            box_corner[:, 0:2] = xy - wh
+            box_corner[:, 2:4] = xy + wh
+            probabilities = detections[:, 4]
+            nms_indices = nms(box_corner, probabilities, self.nms_thres)
+            main_box_corner = box_corner[nms_indices]
+            probabilities_nms = probabilities[nms_indices]
+            if nms_indices.shape[0] == 0:  
+                continue
 
-        postprocessor_args = {"yolo_masks": [(6, 7, 8), (3, 4, 5), (0, 1, 2)],                    # A list of 3 three-dimensional tuples for the YOLO masks
-                            "yolo_anchors": self.anchors,                                          # A list of 9 two-dimensional tuples for the YOLO anchors
-                            "obj_threshold": 0.5,                                               # Threshold for object coverage, float value between 0 and 1
-                            "nms_threshold": 0.25,                                               # Threshold for non-max suppression algorithm, float value between 0 and 1
-                            "yolo_input_resolution": self.input_resolution}
+        BB_list = []
+        for i in range(len(main_box_corner)):
+            x0 = main_box_corner[i, 0].to('cpu').item() / ratio - pad_w
+            y0 = main_box_corner[i, 1].to('cpu').item() / ratio - pad_h
+            x1 = main_box_corner[i, 2].to('cpu').item() / ratio - pad_w
+            y1 = main_box_corner[i, 3].to('cpu').item() / ratio - pad_h 
+            # draw.rectangle((x0, y0, x1, y1), outline="red")
+            # print("BB ", i, "| x = ", x0, "y = ", y0, "w = ", x1 - x0, "h = ", y1 - y0, "probability = ", probabilities_nms[i].item())
+            BB = [round(x0), round(y0), round(y1 - y0), round(x1 - x0)]  # x, y, h, w
+            BB_list.append(BB)
+        return BB_list, probabilities_nms
 
-        postprocessor = PostprocessYOLO(**postprocessor_args)
+        # # Before doing post-processing, we need to reshape the outputs as the common.do_inference will give us flat arrays.
+        # output = [output.reshape(shape) for output, shape in zip(output, self.output_shapes)]
+        
 
-        # # Run the post-processing algorithms on the TensorRT outputs and get the bounding box details of detected objects
-        return postprocessor.process(output, (self.raw_image.size))
+        # postprocessor_args = {"yolo_masks": self.yolo_masks,                    # A list of 3 three-dimensional tuples for the YOLO masks
+        #                     "yolo_anchors": self.anchors,                                          # A list of 9 two-dimensional tuples for the YOLO anchors
+        #                     "obj_threshold": 0.5,                                               # Threshold for object coverage, float value between 0 and 1
+        #                     "nms_threshold": 0.25,                                               # Threshold for non-max suppression algorithm, float value between 0 and 1
+        #                     "yolo_input_resolution": self.input_resolution}
 
-    def _save_out_image(self, boxes, scores, classes):
+        # postprocessor = PostprocessYOLO(**postprocessor_args)
+
+        # # # Run the post-processing algorithms on the TensorRT outputs and get the bounding box details of detected objects
+        # return postprocessor.process(output, (self.raw_image.size))
+
+    def _save_out_image(self, boxes, scores):
         # # Draw the bounding boxes onto the original input image and save it as a PNG file
-        obj_detected_img = TestRunner.draw_bboxes(self.raw_image, boxes, scores, classes, ALL_CATEGORIES)
+        obj_detected_img = TestRunner.draw_bboxes(self.raw_image, boxes, scores)
         obj_detected_img.save(self.out_image, 'PNG')
 
     def _initialize(self):
@@ -139,10 +250,10 @@ class TestRunner:
 
         print("Post processing")
         start = timer()
-        boxes, classes, scores = self._post_process(output)
+        boxes, scores = self._post_process(output)
         postprocess_time = timer() - start
 
-        self._save_out_image(boxes, scores, classes)
+        self._save_out_image(boxes, scores)
         print('Saved image with bounding boxes of detected objects to {}.'.format(self.out_image))
 
         self._destroy()
@@ -166,7 +277,7 @@ class TestRunner:
         return camera_data
 
     @staticmethod
-    def draw_bboxes(image_raw, bboxes, confidences, categories, all_categories, bbox_color='blue'):
+    def draw_bboxes(image_raw, bboxes, confidences, bbox_color='blue'):
         """Draw the bounding boxes on the original input image and return it.
 
         Keyword arguments:
@@ -181,8 +292,8 @@ class TestRunner:
         bbox_color -- an optional string specifying the color of the bounding boxes (default: 'blue')
         """
         draw = ImageDraw.Draw(image_raw)
-        print(bboxes, confidences, categories)
-        for box, score, category in zip(bboxes, confidences, categories):
+        # print(bboxes, confidences)
+        for box, score in zip(bboxes, confidences):
             x_coord, y_coord, width, height = box
             left = max(0, np.floor(x_coord + 0.5).astype(int))
             top = max(0, np.floor(y_coord + 0.5).astype(int))

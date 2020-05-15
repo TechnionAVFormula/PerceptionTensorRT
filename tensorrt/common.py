@@ -149,4 +149,4 @@ def do_inference(context, bindings, inputs, outputs, stream, batch_size=1):
     # Synchronize the stream
     stream.synchronize()
     # Return only the host outputs.
-    return [out.host for out in outputs]
+    return outputs
