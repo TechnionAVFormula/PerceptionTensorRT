@@ -158,65 +158,65 @@ class TestRunner:
         return out
 
     def _post_process(self, output):
-        start = timer()
-        A = TestRunner.mem_to_tensor(output[0], self.output_shapes[0])
-        B = TestRunner.mem_to_tensor(output[1], self.output_shapes[1])
-        C = TestRunner.mem_to_tensor(output[2], self.output_shapes[2])
-        tensor_creation_time = timer() - start
-        print(f"Creating tensor {round((tensor_creation_time)*1000)} [ms] ")
-        print(A.size(), B.size(), C.size())
-        anchors_A = ([self.anchors[i] for i in self.yolo_masks[0]])
-        anchors_B = ([self.anchors[i] for i in self.yolo_masks[1]])
-        anchors_C = ([self.anchors[i] for i in self.yolo_masks[2]])
-        print(anchors_A, anchors_B, anchors_C)
-        output_A = self._forward_yolo_output(A, anchors_A)
-        output_B = self._forward_yolo_output(B, anchors_B)
-        output_C = self._forward_yolo_output(C, anchors_C)
-        print(output_A.size(), output_B.size(), output_C.size())
-        full_output = torch.cat((output_A, output_B, output_C), 1)
-        print(full_output.size())
-        w, h = self.raw_image.size
-        pad_h, pad_w, ratio = calculate_padding(h, w, self.image_height, self.image_width)
-        for detections in full_output:
-            detections = detections[detections[:, 4] > self.conf_thres]
-            box_corner = torch.zeros((detections.shape[0], 4), device=detections.device)
-            xy = detections[:, 0:2]
-            wh = detections[:, 2:4] / 2
-            box_corner[:, 0:2] = xy - wh
-            box_corner[:, 2:4] = xy + wh
-            probabilities = detections[:, 4]
-            nms_indices = nms(box_corner, probabilities, self.nms_thres)
-            main_box_corner = box_corner[nms_indices]
-            probabilities_nms = probabilities[nms_indices]
-            if nms_indices.shape[0] == 0:  
-                continue
+        # start = timer()
+        # A = TestRunner.mem_to_tensor(output[0], self.output_shapes[0])
+        # B = TestRunner.mem_to_tensor(output[1], self.output_shapes[1])
+        # C = TestRunner.mem_to_tensor(output[2], self.output_shapes[2])
+        # tensor_creation_time = timer() - start
+        # print(f"Creating tensor {round((tensor_creation_time)*1000)} [ms] ")
+        # print(A.size(), B.size(), C.size())
+        # anchors_A = ([self.anchors[i] for i in self.yolo_masks[0]])
+        # anchors_B = ([self.anchors[i] for i in self.yolo_masks[1]])
+        # anchors_C = ([self.anchors[i] for i in self.yolo_masks[2]])
+        # print(anchors_A, anchors_B, anchors_C)
+        # output_A = self._forward_yolo_output(A, anchors_A)
+        # output_B = self._forward_yolo_output(B, anchors_B)
+        # output_C = self._forward_yolo_output(C, anchors_C)
+        # print(output_A.size(), output_B.size(), output_C.size())
+        # full_output = torch.cat((output_A, output_B, output_C), 1)
+        # print(full_output.size())
+        # w, h = self.raw_image.size
+        # pad_h, pad_w, ratio = calculate_padding(h, w, self.image_height, self.image_width)
+        # for detections in full_output:
+        #     detections = detections[detections[:, 4] > self.conf_thres]
+        #     box_corner = torch.zeros((detections.shape[0], 4), device=detections.device)
+        #     xy = detections[:, 0:2]
+        #     wh = detections[:, 2:4] / 2
+        #     box_corner[:, 0:2] = xy - wh
+        #     box_corner[:, 2:4] = xy + wh
+        #     probabilities = detections[:, 4]
+        #     nms_indices = nms(box_corner, probabilities, self.nms_thres)
+        #     main_box_corner = box_corner[nms_indices]
+        #     probabilities_nms = probabilities[nms_indices]
+        #     if nms_indices.shape[0] == 0:  
+        #         continue
 
-        BB_list = []
-        for i in range(len(main_box_corner)):
-            x0 = main_box_corner[i, 0].to('cpu').item() / ratio - pad_w
-            y0 = main_box_corner[i, 1].to('cpu').item() / ratio - pad_h
-            x1 = main_box_corner[i, 2].to('cpu').item() / ratio - pad_w
-            y1 = main_box_corner[i, 3].to('cpu').item() / ratio - pad_h 
-            # draw.rectangle((x0, y0, x1, y1), outline="red")
-            # print("BB ", i, "| x = ", x0, "y = ", y0, "w = ", x1 - x0, "h = ", y1 - y0, "probability = ", probabilities_nms[i].item())
-            BB = [round(x0), round(y0), round(y1 - y0), round(x1 - x0)]  # x, y, h, w
-            BB_list.append(BB)
-        return BB_list, probabilities_nms
+        # BB_list = []
+        # for i in range(len(main_box_corner)):
+        #     x0 = main_box_corner[i, 0].to('cpu').item() / ratio - pad_w
+        #     y0 = main_box_corner[i, 1].to('cpu').item() / ratio - pad_h
+        #     x1 = main_box_corner[i, 2].to('cpu').item() / ratio - pad_w
+        #     y1 = main_box_corner[i, 3].to('cpu').item() / ratio - pad_h 
+        #     # draw.rectangle((x0, y0, x1, y1), outline="red")
+        #     # print("BB ", i, "| x = ", x0, "y = ", y0, "w = ", x1 - x0, "h = ", y1 - y0, "probability = ", probabilities_nms[i].item())
+        #     BB = [round(x0), round(y0), round(y1 - y0), round(x1 - x0)]  # x, y, h, w
+        #     BB_list.append(BB)
+        # return BB_list, probabilities_nms
 
-        # # Before doing post-processing, we need to reshape the outputs as the common.do_inference will give us flat arrays.
-        # output = [output.reshape(shape) for output, shape in zip(output, self.output_shapes)]
+        # Before doing post-processing, we need to reshape the outputs as the common.do_inference will give us flat arrays.
+        output = [output.reshape(shape) for output, shape in zip(output, self.output_shapes)]
         
 
-        # postprocessor_args = {"yolo_masks": self.yolo_masks,                    # A list of 3 three-dimensional tuples for the YOLO masks
-        #                     "yolo_anchors": self.anchors,                                          # A list of 9 two-dimensional tuples for the YOLO anchors
-        #                     "obj_threshold": 0.5,                                               # Threshold for object coverage, float value between 0 and 1
-        #                     "nms_threshold": 0.25,                                               # Threshold for non-max suppression algorithm, float value between 0 and 1
-        #                     "yolo_input_resolution": self.input_resolution}
+        postprocessor_args = {"yolo_masks": self.yolo_masks,                    # A list of 3 three-dimensional tuples for the YOLO masks
+                            "yolo_anchors": self.anchors,                                          # A list of 9 two-dimensional tuples for the YOLO anchors
+                            "obj_threshold": 0.5,                                               # Threshold for object coverage, float value between 0 and 1
+                            "nms_threshold": 0.25,                                               # Threshold for non-max suppression algorithm, float value between 0 and 1
+                            "yolo_input_resolution": self.input_resolution}
 
-        # postprocessor = PostprocessYOLO(**postprocessor_args)
+        postprocessor = PostprocessYOLO(**postprocessor_args)
 
-        # # # Run the post-processing algorithms on the TensorRT outputs and get the bounding box details of detected objects
-        # return postprocessor.process(output, (self.raw_image.size))
+        # # Run the post-processing algorithms on the TensorRT outputs and get the bounding box details of detected objects
+        return postprocessor.process(output, (self.raw_image.size))
 
     def _save_out_image(self, boxes, scores):
         # # Draw the bounding boxes onto the original input image and save it as a PNG file

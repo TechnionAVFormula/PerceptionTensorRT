@@ -647,7 +647,7 @@ def do_everything(cfg_name, weights_name):
 
     # Create a GraphBuilderONNX object with the known output tensor dimensions:
     epsilon_bn = 1e-5
-    momentum_bn = 0.99
+    momentum_bn = 0.1
     builder = GraphBuilderONNX(output_tensor_dims, leaky_slope, conv_act, yolo_filts, epsilon_bn, momentum_bn)
 
     # Now generate an ONNX graph with weights from the previously parsed layer configurations

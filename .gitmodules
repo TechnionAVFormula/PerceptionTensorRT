@@ -1,0 +1,3 @@
+[submodule "netron"]
+	path = netron
+	url = git@github.com:TechnionAVFormula/netron.git

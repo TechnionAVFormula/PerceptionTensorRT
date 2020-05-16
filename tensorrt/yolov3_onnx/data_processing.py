@@ -199,7 +199,7 @@ class PostprocessYOLO(object):
         boxes, categories, confidences = self._process_yolo_output(
             outputs_reshaped, resolution_raw)
 
-        return boxes, categories, confidences
+        return boxes, confidences
 
     def _reshape_output(self, output):
         """Reshape a TensorRT output from NCHW to NHWC format (with expected C=255),
